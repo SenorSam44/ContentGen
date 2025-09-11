@@ -1,0 +1,61 @@
+.PHONY: docker-setup setup full-setup
+
+# Setup (delegates to Makefile.setup)
+setup: pdm-install docker-setup ## Check and install Docker if missing
+
+# Full reset: stop, clean, setup, build, and run
+full-setup: down full-clean setup run ## Stop, clean, setup, build, and start fresh
+
+pdm-install: ## install pdm for python management
+	@echo "🔍 Checking PDM..."
+	@if ! command -v pdm >/dev/null 2>&1; then \
+		echo "⚠️ PDM not found. Installing..."; \
+		python3 -m pip install --user pdm; \
+		export PATH=$$HOME/.local/bin:$$PATH; \
+	else \
+		echo "✅ PDM is installed."; \
+	fi
+	@if [ ! -d ".venv" ]; then \
+		echo "🔧 Creating virtualenv and installing dependencies..."; \
+		pdm config python.use_venv true; \
+		pdm install --without dev --without test --no-editable; \
+	else \
+		echo "✅ .venv already exists. Skipping install."; \
+	fi
+
+docker-setup:
+	@if [ "$$(uname)" = "Darwin" ]; then \
+		echo "🔍 Checking Docker on macOS..."; \
+		if ! command -v docker >/dev/null 2>&1; then \
+			echo "⚠️  Docker not found. Please install Docker Desktop for Mac: https://www.docker.com/products/docker-desktop"; \
+			exit 1; \
+		fi; \
+	elif [ "$$(uname)" = "Linux" ]; then \
+		echo "🔍 Checking Docker on Linux..."; \
+		if ! command -v docker >/dev/null 2>&1; then \
+			echo "⚠️  Docker not found. Installing..."; \
+			if command -v apt-get >/dev/null 2>&1; then \
+				sudo apt-get update && sudo apt-get install -y docker.io docker-compose; \
+			elif command -v dnf >/dev/null 2>&1; then \
+				sudo dnf install -y docker docker-compose; \
+			elif command -v yum >/dev/null 2>&1; then \
+				sudo yum install -y docker docker-compose; \
+			elif command -v pacman >/dev/null 2>&1; then \
+				sudo pacman -Sy --noconfirm docker docker-compose; \
+			else \
+				echo "❌ Unsupported Linux package manager. Please install Docker manually."; \
+				exit 1; \
+			fi; \
+		fi; \
+	elif [ "$$OS" = "Windows_NT" ]; then \
+		echo "🔍 Checking Docker on Windows..."; \
+		if ! command -v docker >/dev/null 2>&1; then \
+			echo "⚠️  Docker not found. Please install Docker Desktop for Windows: https://www.docker.com/products/docker-desktop"; \
+			exit 1; \
+		fi; \
+	else \
+		echo "❌ Unsupported OS. Please install Docker manually."; \
+		exit 1; \
+	fi; \
+	echo "✅ Docker is installed."
+

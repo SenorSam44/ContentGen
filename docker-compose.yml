@@ -1,0 +1,19 @@
+services:
+  app:
+    build:
+      context: .
+      args:
+        APP_PORT: ${APP_PORT}
+        WS_PORT: ${WS_PORT}
+    ports:
+      - "${APP_PORT}:${APP_PORT}"
+      - "${WS_PORT}:${WS_PORT}"
+    volumes:
+      - .:/app
+      - ./.venv:/app/.venv  # Mount external venv directory
+    environment:
+      - PDM_VENV_IN_PROJECT=1
+      - PATH=/app/.venv/bin:$PATH
+      - APP_PORT=${APP_PORT}
+      - WS_PORT=${WS_PORT}
+      - HUGGINGFACE_HUB_TOKEN=${HUGGINGFACE_HUB_TOKEN}

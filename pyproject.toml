@@ -1,0 +1,23 @@
+[project]
+name = "ContentGen"
+version = "0.1.0"
+description = "Default template for PDM package"
+authors = [
+    { name = "Sadman Naib", email = "samsikder47@gmail.com" },
+]
+requires-python = ">=3.12,<3.13"
+readme = "README.md"
+license = { text = "MIT" }
+dependencies = [
+    "gradio>=5.44.1",
+    "flask>=3.1.2",
+    "transformers>=4.56.1",
+    "huggingface-hub>=0.34.4",
+    "tensorflow>=2.20.0",
+    "torch>=2.8.0",
+    "tf-keras>=2.20.1",
+]
+
+
+[tool.pdm]
+distribution = false
