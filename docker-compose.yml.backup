@@ -1,0 +1,52 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: ${BUILD_TARGET:-production}  # Allow switching between dev and production
+      args:
+        APP_PORT: ${APP_PORT:-8000}
+        WS_PORT: ${WS_PORT:-7860}
+    ports:
+      - "${APP_PORT:-8000}:${APP_PORT:-8000}"
+      - "${WS_PORT:-7860}:${WS_PORT:-7860}"
+    volumes:
+      # Only mount source code in development
+      - ${COMPOSE_PROFILES:-./src}:/app/src:ro
+      # Mount local .venv if it exists (for development)
+      - ./.venv:/app/.venv:cached
+    environment:
+      - PDM_VENV_IN_PROJECT=1
+      - PATH=/app/.venv/bin:$PATH
+      - APP_PORT=${APP_PORT:-8000}
+      - WS_PORT=${WS_PORT:-7860}
+      - HUGGINGFACE_HUB_TOKEN=${HUGGINGFACE_HUB_TOKEN}
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+    # Resource limits to control memory usage
+    deploy:
+      resources:
+        limits:
+          memory: ${MEMORY_LIMIT:-2g}
+        reservations:
+          memory: ${MEMORY_RESERVATION:-512m}
+    # Health check to ensure app is running
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${APP_PORT:-8000}/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Optional: separate service for development with hot reload
+  app-dev:
+    extends: app
+    build:
+      target: builder
+    volumes:
+      - .:/app:cached
+    environment:
+      - FLASK_ENV=development
+      - GRADIO_SERVER_NAME=0.0.0.0
+    profiles:
+      - dev

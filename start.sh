@@ -1,20 +1,54 @@
 #!/bin/sh
+set -e
 
-# Check if .venv exists and has the expected structure
-if [ -d "/app/.venv/bin" ] && [ -f "/app/.venv/bin/python" ]; then
-    echo "Virtual environment found, checking dependencies..."
-    
-    # Check if dependencies are already installed by trying to import a key package
-    if /app/.venv/bin/python -c "import $(head -1 pdm.lock | cut -d' ' -f1 | tr -d '"')" 2>/dev/null; then
-        echo "Dependencies are already installed, skipping pdm install."
+# Function to check if dependencies are installed
+check_dependencies() {
+    if [ -f "/app/.venv/bin/python" ]; then
+        # Check if key packages are importable
+        /app/.venv/bin/python -c "
+import sys
+try:
+    import gradio, flask, transformers, torch
+    print('Dependencies verified')
+    sys.exit(0)
+except ImportError as e:
+    print(f'Missing dependency: {e}')
+    sys.exit(1)
+" 2>/dev/null
+        return $?
     else
-        echo "Dependencies missing, running pdm install..."
-        pdm install
+        return 1
+    fi
+}
+
+# Check if we're in development mode (volumes mounted)
+if [ -f "/app/pyproject.toml" ] && [ -w "/app" ]; then
+    echo "Development mode detected"
+
+    # Check if local .venv exists and is valid
+    if check_dependencies; then
+        echo "Using existing virtual environment"
+    else
+        echo "Installing/updating dependencies..."
+        # Install PDM if not available
+        if ! command -v pdm >/dev/null 2>&1; then
+            pip install --no-cache-dir pdm
+        fi
+        pdm install --without dev --without test
     fi
 else
-    echo "Virtual environment not found or incomplete, creating new one..."
-    pdm install
+    echo "Production mode - using pre-built environment"
+    if ! check_dependencies; then
+        echo "ERROR: Dependencies not found in production image!"
+        exit 1
+    fi
 fi
 
-# Run the application
-exec pdm run python app.py
+# Set memory-efficient Python options
+export PYTHONUNBUFFERED=1
+export PYTHONDONTWRITEBYTECODE=1
+export PYTHONHASHSEED=random
+
+# Use exec to replace shell process (saves memory)
+echo "Starting application..."
+exec python app.py

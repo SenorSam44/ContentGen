@@ -14,8 +14,13 @@ dependencies = [
     "transformers>=4.56.1",
     "huggingface-hub>=0.34.4",
     "tensorflow>=2.20.0",
-    "torch>=2.8.0",
     "tf-keras>=2.20.1",
+    "langchain>=0.3.27",
+    "langchain-community>=0.3.29",
+    "langchain-openai>=0.3.33",
+    "langchain-huggingface>=0.3.1",
+    "sentence-transformers>=5.1.0",
+    "celery>=5.5.3",
 ]
 
 

@@ -1,19 +1,46 @@
+version: '3.8'
+
 services:
   app:
     build:
       context: .
-      args:
-        APP_PORT: ${APP_PORT}
-        WS_PORT: ${WS_PORT}
+      target: production
     ports:
-      - "${APP_PORT}:${APP_PORT}"
-      - "${WS_PORT}:${WS_PORT}"
+      - "8000:8000"
+      - "7860:7860"
+    environment:
+      APP_PORT: 8000
+      WS_PORT: 7860
+      PYTHONUNBUFFERED: 1
+      PYTHONDONTWRITEBYTECODE: 1
+      HUGGINGFACE_HUB_TOKEN: ${HUGGINGFACE_HUB_TOKEN:-}
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+          cpus: '1.0'
+        reservations:
+          memory: 512m
+    restart: unless-stopped
+
+  app-dev:
+    build:
+      context: .
+      target: builder
+    ports:
+      - "8000:8000"
+      - "7860:7860"
     volumes:
       - .:/app
-      - ./.venv:/app/.venv  # Mount external venv directory
+      - ./.venv:/app/.venv
     environment:
-      - PDM_VENV_IN_PROJECT=1
-      - PATH=/app/.venv/bin:$PATH
-      - APP_PORT=${APP_PORT}
-      - WS_PORT=${WS_PORT}
-      - HUGGINGFACE_HUB_TOKEN=${HUGGINGFACE_HUB_TOKEN}
+      APP_PORT: 8000
+      WS_PORT: 7860
+      PYTHONUNBUFFERED: 1
+      PYTHONDONTWRITEBYTECODE: 1
+      FLASK_ENV: development
+      GRADIO_SERVER_NAME: 0.0.0.0
+      HUGGINGFACE_HUB_TOKEN: ${HUGGINGFACE_HUB_TOKEN:-}
+    profiles:
+      - dev
+    user: "1000:1000"
