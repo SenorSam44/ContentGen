@@ -9,7 +9,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
     curl \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir pdm
+
+# Copy start script only
+COPY --chown=1000:1000 start.sh ./
+RUN chmod +x start.sh
 
 # Create app user matching host user
 RUN adduser --disabled-password --gecos '' --uid 1000 appuser && \

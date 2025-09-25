@@ -1,3 +1,4 @@
+from celery import Celery
 # ---------------------------
 # Celery Setup
 # ---------------------------

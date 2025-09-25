@@ -1,6 +1,11 @@
 # ---------------------------
 # Database Setup
 # ---------------------------
+import sqlite3
+from src.contentgen.config import Config
+config = Config()
+
+
 def init_database():
     """Initialize the database with required tables."""
     with sqlite3.connect(config.DATABASE_PATH) as conn:

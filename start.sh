@@ -1,10 +1,11 @@
 #!/bin/sh
 set -e
 
-# Function to check if dependencies are installed
+# ---------------------------
+# Function to check dependencies
+# ---------------------------
 check_dependencies() {
     if [ -f "/app/.venv/bin/python" ]; then
-        # Check if key packages are importable
         /app/.venv/bin/python -c "
 import sys
 try:
@@ -21,34 +22,48 @@ except ImportError as e:
     fi
 }
 
-# Check if we're in development mode (volumes mounted)
+# ---------------------------
+# Determine environment
+# ---------------------------
+DEV_MODE=false
 if [ -f "/app/pyproject.toml" ] && [ -w "/app" ]; then
+    DEV_MODE=true
     echo "Development mode detected"
-
-    # Check if local .venv exists and is valid
-    if check_dependencies; then
-        echo "Using existing virtual environment"
-    else
-        echo "Installing/updating dependencies..."
-        # Install PDM if not available
-        if ! command -v pdm >/dev/null 2>&1; then
-            pip install --no-cache-dir pdm
-        fi
-        pdm install --without dev --without test
-    fi
-else
-    echo "Production mode - using pre-built environment"
-    if ! check_dependencies; then
-        echo "ERROR: Dependencies not found in production image!"
-        exit 1
-    fi
 fi
 
-# Set memory-efficient Python options
+# ---------------------------
+# Install PDM only if needed
+# ---------------------------
+if ! check_dependencies; then
+    echo "Dependencies missing, installing via PDM..."
+    if ! command -v pdm >/dev/null 2>&1; then
+        pip install --no-cache-dir pdm
+    fi
+    pdm install --without dev --without test
+else
+    echo "Dependencies verified in existing .venv"
+fi
+
+# ---------------------------
+# Set Python environment
+# ---------------------------
 export PYTHONUNBUFFERED=1
 export PYTHONDONTWRITEBYTECODE=1
 export PYTHONHASHSEED=random
 
-# Use exec to replace shell process (saves memory)
-echo "Starting application..."
-exec python app.py
+# ---------------------------
+# Start Flask and Gradio
+# ---------------------------
+APP_PORT=${APP_PORT:-8000}
+WS_PORT=${WS_PORT:-7860}
+
+echo "Starting Flask API on port $APP_PORT..."
+pdm run python app.py &
+
+if [ "$DEV_MODE" = true ]; then
+    echo "Starting Gradio UI on port $WS_PORT..."
+    pdm run python gradio_ui.py &
+fi
+
+# Wait for all background processes
+wait
