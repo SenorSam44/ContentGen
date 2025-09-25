@@ -1,6 +1,5 @@
-version: '3.8'
-
 services:
+  # Production service - optimized build
   app:
     build:
       context: .
@@ -23,16 +22,19 @@ services:
           memory: 512m
     restart: unless-stopped
 
+  # Development service - super fast startup with local .venv
   app-dev:
     build:
       context: .
-      target: builder
+      target: development
     ports:
       - "8000:8000"
       - "7860:7860"
     volumes:
+      # Mount entire project for hot reload
       - .:/app
-      - ./.venv:/app/.venv
+      # This is the key: mount your local .venv
+      - ./.venv:/app/.venv:cached
     environment:
       APP_PORT: 8000
       WS_PORT: 7860
@@ -41,6 +43,7 @@ services:
       FLASK_ENV: development
       GRADIO_SERVER_NAME: 0.0.0.0
       HUGGINGFACE_HUB_TOKEN: ${HUGGINGFACE_HUB_TOKEN:-}
+      PDM_VENV_IN_PROJECT: 1
     profiles:
       - dev
     user: "1000:1000"
