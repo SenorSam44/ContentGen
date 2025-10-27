@@ -45,6 +45,17 @@ def get_campaign_posts_ui(campaign_id):
         return f"Error: {str(e)}"
 
 
+def generate_post_from_headline(business_type, platform):
+    try:
+        response = requests.post("http://localhost:8000/api/develop_post", json={
+            "business_type": business_type,
+            "platform": platform
+        })
+        return response.json().get("post", "No content generated.")
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
 def launch_gradio_ui():
     with gr.Blocks(title="Social Media Post Generator") as demo:
         gr.Markdown("# 🚀 Social Media Post Generator")
@@ -71,6 +82,17 @@ def launch_gradio_ui():
             posts_output = gr.Textbox(label="Generated Posts", lines=20)
 
             view_btn.click(get_campaign_posts_ui, inputs=campaign_id_posts, outputs=posts_output)
+
+        with gr.Tab("Develop Post"):
+            business_type_post = gr.Textbox(label="Business Type")
+            platform_post = gr.Dropdown(["Facebook", "Instagram", "LinkedIn", "Twitter"], value="Instagram")
+            generate_btn = gr.Button("Generate Post")
+            post_output = gr.Textbox(label="Generated Post", lines=10)
+
+            generate_btn.click(generate_post_from_headline,
+                               inputs=[business_type_post, platform_post],
+                               outputs=post_output)
+
 
     demo.launch(
         server_name="0.0.0.0",

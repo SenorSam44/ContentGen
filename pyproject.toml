@@ -20,6 +20,7 @@ dependencies = [
     "sentence-transformers>=5.1.0",
     "celery>=5.5.3",
     "torch==2.3.0+cpu",
+    "llama-cpp-python>=0.3.16",
 ]
 
 

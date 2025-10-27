@@ -7,6 +7,7 @@ from contextlib import contextmanager
 import uuid
 from typing import List, Dict, Optional
 import logging
+import json
 
 from src.contentgen.celery import make_celery
 from src.contentgen.config import Config
@@ -59,6 +60,50 @@ celery = make_celery(app)
 llm_manager = LLMManager()
 
 
+def generate_summary(business_type: str, platform: str) -> str:
+    """Generate a short summary paragraph from a headline."""
+    summary_prompt = f"""You are an expert social media marketer.
+Generate a concise summary (1–2 sentences) for a {platform} post about a {business_type}.
+
+
+The summary should:
+- Capture the main idea
+- Sound natural and professional
+- Avoid hashtags or emojis
+
+Summary:"""
+
+    try:
+        summary = llm_manager.generate_text(summary_prompt, max_new_tokens=120, temperature=0.7)
+        return summary.strip()
+    except Exception as e:
+        logger.error(f"Error generating summary: {str(e)}")
+        return f"A short update about {business_type} on {platform}."
+
+
+def expand_summary_to_post(summary: str, business_type: str, platform: str) -> str:
+    """Expand a short summary into a complete social media post."""
+    expand_prompt = f"""You are a professional social media content creator.
+Using the following summary, write a full post for {platform} that is engaging and clear.
+
+Summary: "{summary}"
+
+Guidelines:
+- Expand naturally into a full-length {platform} post
+- Add 2–3 relevant hashtags
+- Include a call-to-action
+- Maintain a tone appropriate for a {business_type}
+
+Post:"""
+
+    try:
+        full_post = llm_manager.generate_text(expand_prompt, max_new_tokens=800, temperature=0.9)
+        return full_post.strip()
+    except Exception as e:
+        logger.error(f"Error expanding summary: {str(e)}")
+        return f"{summary}\n\nStay tuned for more from {business_type} on {platform}!"
+
+
 # ---------------------------
 # Content Generation Functions
 # ---------------------------
@@ -75,7 +120,7 @@ Requirements:
 
 Headlines:
 1."""
-
+    print("generating headlines")
     try:
         generated_text = llm_manager.generate_text(headline_template, max_new_tokens=200, temperature=0.8)
 
@@ -106,7 +151,7 @@ Headlines:
             idx = len(headlines) % len(fallback_ideas)
             headlines.append(fallback_ideas[idx])
 
-        return headlines[:count]
+        return {"generated_text": generated_text, "headlines": headlines[:count]}
 
     except Exception as e:
         logger.error(f"Error generating headlines: {str(e)}")
@@ -114,36 +159,15 @@ Headlines:
         return [f"Professional {business_type} update #{i + 1}" for i in range(count)]
 
 
-def generate_full_post(headline: str, business_type: str, platform: str) -> str:
-    """Generate a full post from a headline."""
-    post_template = f"""You are an expert social media marketer. Create an engaging {platform} post for a {business_type}.
-
-Headline: "{headline}"
-
-Create a complete social media post that:
-- Expands on the headline naturally
-- Includes relevant hashtags for {platform}
-- Has appropriate length for {platform}
-- Includes a call-to-action
-- Maintains professional tone
-
-Post:"""
-
+def generate_full_post(business_type: str, platform: str) -> str:
+    """Generate a full post in two stages: summary → full post."""
     try:
-        generated_post = llm_manager.generate_text(post_template, max_new_tokens=250, temperature=0.7)
-
-        # Clean up the generated post
-        post = generated_post.strip()
-
-        # Ensure we have some basic content if generation fails
-        if not post or len(post) < 20:
-            post = f"🌟 {headline}\n\nWe're excited to share this update with our {platform} community! Stay tuned for more from {business_type}.\n\n#{business_type.replace(' ', '')} #{platform.lower()} #community"
-
-        return post
-
+        summary = generate_summary(business_type, platform)
+        full_post = expand_summary_to_post(summary, business_type, platform)
+        return full_post
     except Exception as e:
-        logger.error(f"Error generating post: {str(e)}")
-        return f"🌟 {headline}\n\nExciting updates from {business_type}! Follow us for more.\n\n#{business_type.replace(' ', '')} #{platform.lower()}"
+        logger.error(f"Error generating full post: {str(e)}")
+        return f"🌟 {headline}\n\nExciting updates from {business_type}! Follow us for more."
 
 
 # ---------------------------
@@ -303,7 +327,7 @@ def generate_posts_task(self, campaign_id: str):
 
                 # Generate full post
                 full_content = generate_full_post(
-                    post_data['headline'],
+                    # post_data['headline'],
                     business_type,
                     platform
                 )
@@ -384,6 +408,63 @@ def create_campaign():
     except Exception as e:
         logger.error(f"Error creating campaign: {str(e)}")
         return jsonify({'error': str(e)}), 500
+
+from flask import Response, stream_with_context
+
+@app.route('/api/develop_post', methods=["POST"])
+def develop_post():
+    data = request.get_json()
+    # headline = data.get("headline", "").strip()
+    business_type = data.get("business_type", "").strip()
+    platform = data.get("platform", "").strip()
+
+    if not business_type or not platform:
+        return jsonify({"error": "headline, business_type, and platform are required"}), 400
+
+    @stream_with_context
+    def generate_stream():
+        try:
+            # Step 1 — Generate 5 summaries
+            summary_prompt = f"""You are an expert social media strategist.
+                Generate 5 short summaries for {platform} posts about a {business_type}.
+
+                Each summary should be:
+                - 1–2 sentences long
+                - Distinct in tone or angle
+                - No hashtags or emojis
+                Output format: numbered list (1. ... 2. ... etc.)"""
+
+            summaries_text = llm_manager.generate_text(summary_prompt, max_new_tokens=300)
+            summaries = [s.strip(" .") for s in summaries_text.split("\n") if s.strip() and s[0].isdigit()]
+
+            # if not summaries:
+            #     summaries = [f"Short update about {headline} for {platform}."]
+
+            # Step 2 — Expand each summary into a full post
+            for i, summary in enumerate(summaries, start=1):
+                expand_prompt = f"""You are a professional social media content creator.
+                Using the following summary, write a complete post for {platform} about a {business_type}.
+
+                Summary: "{summary}"
+
+                Guidelines:
+                - Keep the tone consistent and professional
+                - Include 2–3 relevant hashtags
+                - Add a call-to-action
+                - Avoid repetition
+
+                Post:"""
+
+                full_post = llm_manager.generate_text(expand_prompt, max_new_tokens=800, temperature=0.9)
+
+                # Step 3 — Stream the partial result
+                yield f"data: {json.dumps({'index': i, 'summary': summary, 'post': full_post.strip()})}\n\n"
+
+        except Exception as e:
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+
+    return Response(generate_stream(), mimetype="text/event-stream")
+
 
 
 @app.route('/api/campaigns/<campaign_id>/status', methods=['GET'])
