@@ -1,4 +1,13 @@
 # ContentGen
+
+## Run locally
+ 1. pdm init
+ 2. run two terminals together
+    i. pdm run app.py
+    ii. pdm run  gradio_ui.py
+ 
+ # docker draft
+ 
  pip install torch==2.3.0+cpu --index-url https://download.pytorch.org/whl/cpu 
 
 ## For development (reuses local .venv)
