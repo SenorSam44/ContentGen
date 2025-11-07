@@ -1,5 +1,4 @@
 # app.py - Main Flask Application
-import os
 
 from flask import Flask, request, jsonify
 import sqlite3
@@ -7,10 +6,14 @@ from contextlib import contextmanager
 import uuid
 from typing import List, Dict, Optional
 import logging
+import os
+from dotenv import load_dotenv
+
 import json
+import re
+
 
 from src.contentgen.celery import make_celery
-from src.contentgen.config import Config
 from src.contentgen.database import init_database
 from src.contentgen.llm import LLMManager
 
@@ -18,22 +21,17 @@ from src.contentgen.llm import LLMManager
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-config = Config()
+load_dotenv()
 
 # ---------------------------
 # Flask App Setup
 # ---------------------------
 app = Flask(__name__)
-# app.config.update(
-#     CELERY_BROKER_URL=config.CELERY_BROKER_URL,
-#     CELERY_RESULT_BACKEND=config.CELERY_RESULT_BACKEND
-# )
 app.config.update(
-    CELERY_BROKER_URL="memory://",
-    CELERY_RESULT_BACKEND="rpc://",
-    CELERY_TASK_ALWAYS_EAGER=True  # run tasks synchronously, no broker needed
+    CELERY_BROKER_URL=os.getenv("CELERY_BROKER_URL", "memory://"),
+    CELERY_RESULT_BACKEND=os.getenv("CELERY_RESULT_BACKEND", "rpc://"),
+    CELERY_TASK_ALWAYS_EAGER=os.getenv("CELERY_TASK_ALWAYS_EAGER", "True").lower() == "true"
 )
-
 
 # ---------------------------
 # Application Initialization
@@ -47,7 +45,7 @@ def initialize_app():
 @contextmanager
 def get_db_connection():
     """Context manager for database connections."""
-    conn = sqlite3.connect(config.DATABASE_PATH)
+    conn = sqlite3.connect(os.getenv("DATABASE_PATH", "social_media.db"))
     conn.row_factory = sqlite3.Row
     try:
         yield conn
@@ -59,26 +57,39 @@ celery = make_celery(app)
 # Initialize LLM manager
 llm_manager = LLMManager()
 
+def generate_summary(business_type: str, platform: str) -> list[str]:
+    """Generate structured example summaries as a JSON list."""
+    prompt = f"""
+You are an expert social media marketer.
 
-def generate_summary(business_type: str, platform: str) -> str:
-    """Generate a short summary paragraph from a headline."""
-    summary_prompt = f"""You are an expert social media marketer.
-Generate a concise summary (1–2 sentences) for a {platform} post about a {business_type}.
-
-
-The summary should:
-- Capture the main idea
+Task:
+Generate 5 short example summaries (1–2 sentences) for {platform} posts about a {business_type}.
+Each example should:
 - Sound natural and professional
-- Avoid hashtags or emojis
+- Avoid hashtags and emojis
+- Be self-contained (no numbering, no extra commentary)
 
-Summary:"""
+Return output **only** as a valid JSON list of strings.
+Example format:
+["Example 1", "Example 2", "Example 3"]
+"""
 
     try:
-        summary = llm_manager.generate_text(summary_prompt, max_new_tokens=120, temperature=0.7)
-        return summary.strip()
+        raw_output = llm_manager.generate_text(prompt, max_new_tokens=200, temperature=0.7).strip()
+
+        # Try to parse as JSON directly
+        match = re.search(r"\[.*\]", raw_output, re.DOTALL)
+        if match:
+            cleaned = match.group(0)
+            examples = json.loads(cleaned)
+        else:
+            # fallback: split by newline if JSON not valid
+            examples = [line.strip(" -*>\n") for line in raw_output.split("\n") if line.strip()]
+
+        return [ex for ex in examples if ex]
     except Exception as e:
-        logger.error(f"Error generating summary: {str(e)}")
-        return f"A short update about {business_type} on {platform}."
+        logger.error(f"Error generating examples: {str(e)}")
+        return [f"Sample post idea for {business_type} on {platform}."]
 
 
 def expand_summary_to_post(summary: str, business_type: str, platform: str) -> str:
@@ -98,65 +109,11 @@ Post:"""
 
     try:
         full_post = llm_manager.generate_text(expand_prompt, max_new_tokens=800, temperature=0.9)
+        print(f"full_post: {full_post}")
         return full_post.strip()
     except Exception as e:
         logger.error(f"Error expanding summary: {str(e)}")
         return f"{summary}\n\nStay tuned for more from {business_type} on {platform}!"
-
-
-# ---------------------------
-# Content Generation Functions
-# ---------------------------
-def generate_headlines_batch(business_type: str, platform: str, count: int) -> List[str]:
-    """Generate multiple headlines at once."""
-    headline_template = f"""Generate {count} engaging social media headlines for a {business_type} on {platform}.
-
-Requirements:
-- Each headline should be unique and engaging  
-- Suitable for {platform} audience
-- Professional tone for {business_type}
-- Maximum 60 characters each
-- One headline per line
-
-Headlines:
-1."""
-    print("generating headlines")
-    try:
-        generated_text = llm_manager.generate_text(headline_template, max_new_tokens=200, temperature=0.8)
-
-        # Parse headlines from generated text
-        headlines = []
-        lines = generated_text.split('\n')
-
-        for line in lines:
-            line = line.strip()
-            if line and len(line) > 3:  # Skip very short lines
-                # Clean up numbering and formatting
-                headline = line.lstrip('0123456789.- ').strip()
-                if headline and len(headline) <= 60 and len(headlines) < count:
-                    headlines.append(headline)
-
-        # Ensure we have enough headlines with fallbacks
-        while len(headlines) < count:
-            fallback_ideas = [
-                f"Latest updates from your favorite {business_type}",
-                f"What's new at {business_type} this week?",
-                f"Behind the scenes at {business_type}",
-                f"Special announcement from {business_type}",
-                f"Customer favorites at {business_type}",
-                f"{business_type} community spotlight",
-                f"Tips and tricks from {business_type}",
-                f"Celebrating milestones at {business_type}"
-            ]
-            idx = len(headlines) % len(fallback_ideas)
-            headlines.append(fallback_ideas[idx])
-
-        return {"generated_text": generated_text, "headlines": headlines[:count]}
-
-    except Exception as e:
-        logger.error(f"Error generating headlines: {str(e)}")
-        # Return fallback headlines
-        return [f"Professional {business_type} update #{i + 1}" for i in range(count)]
 
 
 def generate_full_post(business_type: str, platform: str) -> str:
@@ -189,28 +146,27 @@ class DatabaseManager:
         return campaign_id
 
     @staticmethod
-    def save_headlines(campaign_id: str, headlines: List[str]):
-        """Save generated headlines to database."""
+    def save_summaries(campaign_id: str, summaries: List[str]):
+        """Save generated summaries to database."""
         with get_db_connection() as conn:
-            for i, headline in enumerate(headlines):
-                headline_id = str(uuid.uuid4())
+            for i, summary in enumerate(summaries):
+                summary_id = str(uuid.uuid4())
                 conn.execute('''
                     INSERT INTO post_headlines (id, campaign_id, headline, post_order, status)
                     VALUES (?, ?, ?, ?, 'ready')
-                ''', (headline_id, campaign_id, headline, i + 1))
+                ''', (summary_id, campaign_id, summary, i + 1))
 
-                # Create corresponding post entry
                 post_id = str(uuid.uuid4())
                 conn.execute('''
                     INSERT INTO generated_posts (id, campaign_id, headline_id, status)
                     VALUES (?, ?, ?, 'pending')
-                ''', (post_id, campaign_id, headline_id))
+                ''', (post_id, campaign_id, summary_id))
 
-            # Update campaign status
             conn.execute('''
                 UPDATE campaigns SET status = 'posts_generating' WHERE id = ?
             ''', (campaign_id,))
             conn.commit()
+
 
     @staticmethod
     def update_campaign_status(campaign_id: str, status: str, error_message: str = None):
@@ -325,12 +281,9 @@ def generate_posts_task(self, campaign_id: str):
                     meta={'current': i, 'total': total_posts, 'status': f'Generating post {i + 1}/{total_posts}'}
                 )
 
-                # Generate full post
-                full_content = generate_full_post(
-                    # post_data['headline'],
-                    business_type,
-                    platform
-                )
+                summary = post_data['headline']  # reuse the same column for now
+                full_content = expand_summary_to_post(summary, business_type, platform)
+
 
                 # Save to database
                 with get_db_connection() as conn:
@@ -357,7 +310,11 @@ def generate_posts_task(self, campaign_id: str):
         # Update campaign status to completed
         DatabaseManager.update_campaign_status(campaign_id, 'completed')
 
-        return {'status': 'completed', 'campaign_id': campaign_id}
+        return jsonify({
+            'success': True,
+            'campaign_id': campaign_id,
+            'message': 'Summaries generated successfully. Posts are being developed in background.'
+        })
 
     except Exception as e:
         logger.error(f"Task failed for campaign {campaign_id}: {str(e)}")
@@ -381,18 +338,21 @@ def create_campaign():
         if not business_type or not platform:
             return jsonify({'error': 'business_type and platform are required'}), 400
 
-        if not isinstance(total_posts, int) or total_posts < 1 or total_posts > config.MAX_POSTS_PER_CAMPAIGN:
-            return jsonify({'error': f'total_posts must be between 1 and {config.MAX_POSTS_PER_CAMPAIGN}'}), 400
+        if not isinstance(total_posts, int) or total_posts < 1 or total_posts > os.getenv("MAX_POSTS_PER_CAMPAIGN", 20):
+            return jsonify({'error': f'total_posts must be between 1 and {os.getenv("MAX_POSTS_PER_CAMPAIGN", 20)}'}), 400
 
         # Create campaign
         campaign_id = DatabaseManager.create_campaign(business_type, platform, total_posts)
 
         # Generate headlines (Stage 1)
-        logger.info(f"Generating {total_posts} headlines for campaign {campaign_id}")
-        headlines = generate_headlines_batch(business_type, platform, total_posts)
+        logger.info(f"Generating {total_posts} summaries for campaign {campaign_id}")
 
-        # Save headlines
-        DatabaseManager.save_headlines(campaign_id, headlines)
+        summaries = []
+        for i in range(total_posts):
+            summary = generate_summary(business_type, platform)
+            summaries.append(summary)
+
+        DatabaseManager.save_summaries(campaign_id, summaries)
 
         # Start background task for post generation (Stage 2)
         task = generate_posts_task.delay(campaign_id)
@@ -401,7 +361,7 @@ def create_campaign():
             'success': True,
             'campaign_id': campaign_id,
             'task_id': task.id,
-            'headlines': headlines,
+            'summaries': summaries,
             'message': 'Headlines generated successfully. Posts are being generated in background.'
         })
 

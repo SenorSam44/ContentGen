@@ -1,14 +1,16 @@
 # ---------------------------
 # Database Setup
 # ---------------------------
+import os
 import sqlite3
-from src.contentgen.config import Config
-config = Config()
 
+from dotenv import load_dotenv
+
+load_dotenv()
 
 def init_database():
     """Initialize the database with required tables."""
-    with sqlite3.connect(config.DATABASE_PATH) as conn:
+    with sqlite3.connect(os.getenv("DATABASE_PATH", "social_media.db")) as conn:
         conn.executescript('''
             CREATE TABLE IF NOT EXISTS campaigns (
                 id TEXT PRIMARY KEY,
