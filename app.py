@@ -148,114 +148,39 @@ def get_campaign_summaries(campaign_id):
         return jsonify({'error': str(e)}), 500
 
 
-@app.route('/api/campaigns/<campaign_id>/develop_posts', methods=['POST'])
-def develop_posts_for_campaign(campaign_id):
-    """
-    Generate detailed posts for all summaries of a given campaign.
-    """
-    try:
-        data = request.get_json() or {}
-        platform = data.get("platform", "").strip()
-        business_type = data.get("business_type", "").strip()
 
-        if not platform or not business_type:
-            return jsonify({"error": "platform and business_type are required"}), 400
-
-        # 1. Fetch summaries from database (if already saved)
-        summaries = DatabaseManager.get_campaign_summaries(campaign_id)
-        if not summaries:
-            return jsonify({
-                "error": "No summaries found for this campaign. Create one first."
-            }), 404
-
-        # 2. Extract summary texts
-        summary_texts = [
-            s["summary"] if isinstance(s, dict) and "summary" in s else s
-            for s in summaries
-        ]
-
-        # 3. Generate posts for each summary
-        posts = llm_manager.generate_posts(
-            summaries=summary_texts,
-            platform=platform,
-            business_profile={"business_type": business_type, "platform": platform},
-        )
-
-        # 4. Save posts in database
-        DatabaseManager.save_posts(campaign_id, posts)
-
-        # 5. Return structured output
-        return jsonify({
-            "success": True,
-            "campaign_id": campaign_id,
-            "platform": platform,
-            "posts": posts,
-            "message": f"Generated {len(posts)} posts successfully."
-        })
-
-    except Exception as e:
-        logger.error(f"Error generating posts: {e}")
-        return jsonify({
-            "success": False,
-            "error": str(e),
-            "message": "Failed to generate posts."
-        }), 500
-
-
-
-@app.route('/api/develop_post', methods=["POST"])
-def develop_post():
+@app.route('/api/campaigns/develop_posts', methods=["POST"])
+def develop_posts():
     data = request.get_json()
-    # headline = data.get("headline", "").strip()
-    business_type = data.get("business_type", "").strip()
-    platform = data.get("platform", "").strip()
+    campaign_id = data.get("campaign_id")
+    summaries = data.get("summaries", [])
+    platform = data.get("platform", "Facebook").strip()
+    business_profile = data.get("business_profile", {})
 
-    if not business_type or not platform:
-        return jsonify({"error": "headline, business_type, and platform are required"}), 400
+    if not summaries or not isinstance(summaries, list):
+        return jsonify({"success": False, "error": "summaries must be a list"}), 400
 
-    @stream_with_context
-    def generate_stream():
-        try:
-            # Step 1 — Generate 5 summaries
-            summary_prompt = f"""You are an expert social media strategist.
-                Generate 5 short summaries for {platform} posts about a {business_type}.
+    # Extract clean summary texts
+    summaries_list = [
+        {"summary": s.get("summary", "").strip(), "topic": s.get("topic", "General").strip()}
+        for s in summaries if s.get("summary", "").strip()
+    ]
 
-                Each summary should be:
-                - 1–2 sentences long
-                - Distinct in tone or angle
-                - No hashtags or emojis
-                Output format: numbered list (1. ... 2. ... etc.)"""
+    # Call generate_posts instead of generate_text
+    posts = llm_manager.generate_posts(
+        summaries=summaries_list,
+        platform=platform,
+        business_profile=business_profile
+    )
 
-            summaries_text = llm_manager.generate_text(summary_prompt, max_new_tokens=300)
-            summaries = [s.strip(" .") for s in summaries_text.split("\n") if s.strip() and s[0].isdigit()]
+    return jsonify({
+        "success": True,
+        "campaign_id": campaign_id,
+        "posts": posts,
+        "message": f"Generated {len(posts)} posts successfully."
+    })
+    
 
-            # if not summaries:
-            #     summaries = [f"Short update about {headline} for {platform}."]
-
-            # Step 2 — Expand each summary into a full post
-            for i, summary in enumerate(summaries, start=1):
-                expand_prompt = f"""You are a professional social media content creator.
-                Using the following summary, write a complete post for {platform} about a {business_type}.
-
-                Summary: "{summary}"
-
-                Guidelines:
-                - Keep the tone consistent and professional
-                - Include 2–3 relevant hashtags
-                - Add a call-to-action
-                - Avoid repetition
-
-                Post:"""
-
-                full_post = llm_manager.generate_text(expand_prompt, max_new_tokens=800, temperature=0.9)
-
-                # Step 3 — Stream the partial result
-                yield f"data: {json.dumps({'index': i, 'summary': summary, 'post': full_post.strip()})}\n\n"
-
-        except Exception as e:
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
-
-    return Response(generate_stream(), mimetype="text/event-stream")
 
 
 

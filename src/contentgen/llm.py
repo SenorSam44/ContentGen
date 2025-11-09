@@ -287,10 +287,18 @@ class LLMManager:
 
         posts = []
         for s in summaries:
-            result = chain.invoke({"context": context, "platform": platform, "summary": s})
+            summary = s["summary"]
+            topic = s.get("topic", "General")
+            result = chain.invoke({
+                "context": context,
+                "platform": platform,
+                "summary": f"Topic: {topic}\n{summary}"
+            })
             posts.append({
-                "summary": s,
+                "summary": summary,
+                "topic": topic,
                 "platform": platform,
                 "content": result["text"].strip()
             })
+
         return posts

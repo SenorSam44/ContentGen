@@ -62,35 +62,49 @@ def get_campaign_summaries_ui(campaign_id):
         return [["Error", str(e)]]
 
 
+def develop_posts_ui(campaign_id, summaries=None):
+    # try:
+    payload = {"campaign_id": campaign_id}
+    if summaries:
+        payload["summaries"] = summaries  # expects list of {topic, summary}
 
-def generate_post_from_headline(business_type, platform):
-    try:
-        response = requests.post("http://localhost:8000/api/develop_post", json={
-            "business_type": business_type,
-            "platform": platform
-        })
-        return response.json().get("post", "No content generated.")
-    except Exception as e:
-        return f"Error: {str(e)}"
+    response = requests.post("http://localhost:8000/api/campaigns/develop_posts", json=payload)
+    data = response.json()
+
+    if data.get("success"):
+        posts = data.get("posts", [])
+        return "\n\n".join(
+            [f"=== Post #{i+1} ===\n{p}\n" for i, p in enumerate(posts)]
+        )
+    return json.dumps(data, indent=2)
+    # except Exception as e:
+    #     return f"Error: {str(e)}"
 
 
 def launch_gradio_ui():
     with gr.Blocks(title="Social Media Post Generator") as demo:
         gr.Markdown("# 🚀 Social Media Post Generator")
 
+
         with gr.Tab("Develop Post"):
             business_type_post = gr.Textbox(label="Business Type", value="Coffee Shop")
-            platform_post = gr.Dropdown(["Facebook", "Instagram", "LinkedIn", "Twitter"], label="Platform",  value="Instagram")
+            platform_post = gr.Dropdown(["Facebook", "Instagram", "LinkedIn", "Twitter"],
+                                        label="Platform", value="Instagram")
             total_posts_post = gr.Number(label="Number of Summaries", value=5, minimum=1, maximum=10)
 
             generate_summaries_btn = gr.Button("1️⃣ Generate Summaries")
-            summaries_list = gr.Textbox(label="Generated Summaries", lines=10, interactive=False)
-            state_campaign = gr.State()  # to hold campaign_id and summaries
+            summaries_json_box = gr.Textbox(
+                label="Generated Summaries (Editable JSON)",
+                lines=10,
+                value="[]",
+                interactive=True
+            )
+            state_campaign = gr.State()
 
-            generate_posts_btn = gr.Button("2️⃣ Generate Posts from Summaries", interactive=False)
+            develop_posts_btn = gr.Button("2️⃣ Develop Posts from Summaries", interactive=False)
             posts_output = gr.Textbox(label="Generated Posts", lines=20)
 
-            # Step 1 — create campaign and get summaries
+            # Step 1: Generate summaries as JSON and display them
             def create_campaign_and_show_summaries(business_type, platform, total_posts):
                 resp = requests.post(
                     "http://localhost:8000/api/campaigns/create",
@@ -98,44 +112,37 @@ def launch_gradio_ui():
                 )
                 data = resp.json()
                 if not data.get("success"):
-                    return f"Error: {data}", None, gr.update(interactive=False)
+                    return json.dumps(data, indent=2), None, gr.update(interactive=False)
 
-
-                # headlines = data.get("headlines", {}).get("headlines", [])
-                # text = "\n".join(f"{i+1}. {h}" for i, h in enumerate(headlines))
-                # return text, {"campaign_id": data["campaign_id"], "headlines": headlines}, gr.update(interactive=True)
+                summaries = data.get("summaries", [])
+                json_text = json.dumps(summaries, indent=2)
+                state = {"campaign_id": data["campaign_id"]}
+                return json_text, state, gr.update(interactive=True)
 
             generate_summaries_btn.click(
                 create_campaign_and_show_summaries,
                 inputs=[business_type_post, platform_post, total_posts_post],
-                outputs=[summaries_list, state_campaign, generate_posts_btn],
+                outputs=[summaries_json_box, state_campaign, develop_posts_btn],
             )
 
-            # Step 2 — iterate summaries and call /api/develop_post for each
-            def generate_posts_from_summaries(state, business_type, platform):
-                if not state or "headlines" not in state:
-                    return "No summaries found."
-                results = []
-                for i, summary in enumerate(state["headlines"], start=1):
-                    resp = requests.post(
-                        "http://localhost:8000/api/develop_post",
-                        json={"business_type": business_type, "platform": platform},
-                        stream=True,
-                    )
-                    post_text = ""
-                    for line in resp.iter_lines():
-                        if line and line.startswith(b"data:"):
-                            payload = json.loads(line[5:])
-                            if "post" in payload:
-                                post_text = payload["post"]
-                    results.append(f"=== Post {i} ===\n{post_text}\n")
-                return "\n\n".join(results)
+            # Step 2: Use edited JSON summaries to generate posts
+            def develop_posts_from_summaries(state, summaries_text):
+                if not state or "campaign_id" not in state:
+                    return "No valid campaign found."
 
-            generate_posts_btn.click(
-                generate_posts_from_summaries,
-                inputs=[state_campaign, business_type_post, platform_post],
+                try:
+                    summaries = json.loads(summaries_text)
+                except json.JSONDecodeError as e:
+                    return f"Invalid JSON format: {e}"
+
+                return develop_posts_ui(state["campaign_id"], summaries)
+
+            develop_posts_btn.click(
+                develop_posts_from_summaries,
+                inputs=[state_campaign, summaries_json_box],
                 outputs=posts_output,
             )
+
 
         with gr.Tab("Create Campaign"):
             business_type = gr.Textbox(label="Business Type", value="Coffee Shop")
