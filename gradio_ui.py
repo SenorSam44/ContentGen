@@ -45,6 +45,24 @@ def get_campaign_posts_ui(campaign_id):
         return f"Error: {str(e)}"
 
 
+def get_campaign_summaries_ui(campaign_id):
+    """
+    Fetch summaries from API and return as a list of [topic, summary] for Gradio Dataframe.
+    """
+    try:
+        response = requests.get(f"http://localhost:8000/api/campaigns/{campaign_id}/summaries")
+        data = response.json()
+        if data.get("success"):
+            summaries = data["summaries"]
+            # Convert to list of [topic, summary] rows
+            table_data = [[s.get("topic", "N/A"), s.get("summary", "N/A")] for s in summaries]
+            return table_data
+        return [["Error", json.dumps(data)]]
+    except Exception as e:
+        return [["Error", str(e)]]
+
+
+
 def generate_post_from_headline(business_type, platform):
     try:
         response = requests.post("http://localhost:8000/api/develop_post", json={
@@ -127,6 +145,22 @@ def launch_gradio_ui():
             campaign_output = gr.Code(label="Campaign Result", language="json")
 
             create_btn.click(create_campaign_ui, inputs=[business_type, platform, total_posts], outputs=campaign_output)
+
+        with gr.Tab("View Summaries"):
+            campaign_id_summaries = gr.Textbox(label="Campaign ID")
+            view_summaries_btn = gr.Button("Fetch Summaries")
+            summaries_table = gr.Dataframe(
+                headers=["Topic", "Summary"],
+                datatype=["str", "str"],
+                interactive=False
+            )
+
+            view_summaries_btn.click(
+                get_campaign_summaries_ui,
+                inputs=campaign_id_summaries,
+                outputs=summaries_table,
+            )
+
 
         with gr.Tab("Check Status"):
             campaign_id_input = gr.Textbox(label="Campaign ID")

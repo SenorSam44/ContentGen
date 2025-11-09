@@ -1,12 +1,26 @@
-# src/contentgen/llm.py
+import json
 import os
-from typing import Dict, Any
+import re
 
 import torch
 import logging
 from dotenv import load_dotenv
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from typing import Any
+
+from transformers import (
+    AutoTokenizer,
+    AutoModelForCausalLM,
+    pipeline,
+    BitsAndBytesConfig
+)
+from langchain.prompts import PromptTemplate
+from langchain.chains import LLMChain
+
+
 from huggingface_hub import login, snapshot_download
+
+# LangChain integration
+from langchain_huggingface import HuggingFacePipeline
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -14,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 
 class LLMManager:
-    """Simplified and memory-efficient Gemma 3-1B LLM wrapper."""
+    """LangChain-adapted Gemma 3-1B LLM wrapper."""
 
     _instance = None
 
@@ -36,6 +50,9 @@ class LLMManager:
         self.tokenizer = self._load_tokenizer()
         self.model = self._load_model()
         self.device = self._get_model_device()
+        self.llm = self._build_langchain_pipeline()  # <— integrated here
+
+        torch.set_grad_enabled(False)
 
     # ------------------------------------------------------------------
     # Initialization helpers
@@ -73,10 +90,17 @@ class LLMManager:
         try:
             model = AutoModelForCausalLM.from_pretrained(self.local_dir, **kwargs)
             logger.info("Model loaded successfully.")
-            return model
         except Exception as e:
             logger.error(f"Failed to load model: {e}")
             raise
+
+        # Limit model precision and disable gradients globally
+        if torch.cuda.is_available():
+            model.to(torch.bfloat16)  # lower precision to reduce VRAM
+        else:
+            model.to(torch.float32)
+
+        return model
 
     def _get_model_device(self):
         try:
@@ -87,9 +111,7 @@ class LLMManager:
     # ------------------------------------------------------------------
     # Config helpers
     # ------------------------------------------------------------------
-    from typing import Dict, Any
-
-    def _build_load_config(self) -> Dict[str, Any]:
+    def _build_load_config(self) -> dict[str, Any]:
         """
         Build efficient model load configuration for transformers.
         Uses bitsandbytes quantization if CUDA + USE_BNB=1.
@@ -99,12 +121,11 @@ class LLMManager:
         load_4bit: bool = os.getenv("LOAD_4BIT", "0") == "1"
         offload_dir: str | None = os.getenv("OFFLOAD_DIR")
 
-        load_cfg: Dict[str, Any] = {"low_cpu_mem_usage": True}
+        load_cfg: dict[str, Any] = {"low_cpu_mem_usage": True}
 
         # Try bitsandbytes quantization if available
         if cuda and use_bnb:
             try:
-                from transformers import BitsAndBytesConfig
 
                 quant_cfg: BitsAndBytesConfig
                 if load_4bit:
@@ -136,6 +157,7 @@ class LLMManager:
                 "torch_dtype": torch.float16,
                 "device_map": "auto",
             })
+            logger.info("Using CUDA load.")
         else:
             load_cfg["device_map"] = None
             logger.info("Using CPU-only low-memory load.")
@@ -143,7 +165,24 @@ class LLMManager:
         return load_cfg
 
     # ------------------------------------------------------------------
-    # Context and generation
+    # LangChain Integration
+    # ------------------------------------------------------------------
+    def _build_langchain_pipeline(self):
+        """Wrap model in a LangChain-compatible pipeline."""
+        gen_pipe = pipeline(
+            "text-generation",
+            model=self.model,
+            tokenizer=self.tokenizer,
+            device=0 if torch.cuda.is_available() else -1,
+            max_new_tokens=self._resolve_token_limit(),
+            temperature=0.7,
+            top_p=0.9,
+            do_sample=True,
+        )
+        return HuggingFacePipeline(pipeline=gen_pipe)
+
+    # ------------------------------------------------------------------
+    # Context + generation
     # ------------------------------------------------------------------
     def _business_context(self, profile: dict) -> str:
         name = profile.get("business_name", "The brand")
@@ -159,7 +198,7 @@ class LLMManager:
             f"Current campaign focus: {focus}."
         )
 
-    def _resolve_token_limit(self, default: int = 150) -> int:
+    def _resolve_token_limit(self, default: int = 1500) -> int:
         """Resolve MAX_NEW_TOKENS from environment."""
         env_val = os.getenv("MAX_NEW_TOKENS")
         if not env_val:
@@ -169,45 +208,89 @@ class LLMManager:
         except ValueError:
             return default
 
-    def generate_text(
-        self,
-        prompt: str,
-        business_profile: dict = None,
-        max_new_tokens: int = None,
-        temperature: float = 0.7,
-        top_p: float = 0.9,
-        do_sample: bool = True,
-    ) -> str:
-        """Generate structured marketing text efficiently."""
-        max_new_tokens = max_new_tokens or self._resolve_token_limit()
+    # ------------------------------------------------------------------
+    # Summaries
+    # ------------------------------------------------------------------
+    def generate_summaries(self, topics: list[str], business_profile: dict = None, n: int = 5) -> list[dict]:
+        """Generate N short marketing summaries with LangChain but restricted context and precision."""
         context = self._business_context(business_profile or {})
+        topics_str = "\n".join(topics)
 
-        full_prompt = (
-            "You are a professional e-commerce content strategist.\n\n"
-            f"Context:\n{context}\n\n"
-            f"Task:\n{prompt.strip()}\n\n"
-            "Ensure the output sounds authentic, on-brand, and ready for publication."
+        # # Truncate overly long context to save memory
+        # if len(context) > 800:
+        #     context = context[:800] + "..."
+
+        print("generate_summaries...")
+        # Cache the template to avoid re-creation overhead
+        if not hasattr(self, "_summary_template"):
+            self._summary_template = PromptTemplate(
+                input_variables=["context", "topics", "n"],
+                template=(
+                    "You are a professional e-commerce marketing strategist.\n"
+                    "Business context:\n{context}\n\n"
+                    "Generate exactly {n} short and catchy campaign summaries "
+                    "for these topics:\n{topics}\n\n"
+                    "Each summary must be concise (under 40 words), emotionally engaging, "
+                    "and relevant to the brand tone.\n\n"
+                    "Return a single JSON array of objects, each with 'topic' and 'summary' fields.\n"
+                    "Example:\n"
+                    '[{{\"topic\": \"Example Topic\", \"summary\": \"A short summary.\"}}]'
+                ),
+            )
+
+        # Build or reuse LLMChain with the existing pipeline
+        if not hasattr(self, "_summary_chain"):
+            self._summary_chain = self._summary_template | self.llm
+
+        # Run inference through LangChain
+        response = self._summary_chain.invoke({
+            "context": context,
+            "topics": topics_str,
+            "n": n
+        })
+
+        prompt_str = self._summary_template.format(context=context, topics=topics_str, n=n)
+        text = response["text"] if isinstance(response, dict) else response
+        text = text[len(prompt_str)+9:-5]
+
+        print(f"{text=}")
+
+        # Extract the first valid JSON array
+        items = json.loads(text)
+        print(f"{items=}")
+
+        return items
+
+    # ------------------------------------------------------------------
+    # Platform-specific post generation
+    # ------------------------------------------------------------------
+    def generate_posts(
+        self,
+        summaries: list[str],
+        platform: str,
+        business_profile: dict = None,
+    ) -> list[dict]:
+        """Generate detailed social media posts for a given platform."""
+        context = self._business_context(business_profile or {})
+        template = PromptTemplate(
+            input_variables=["context", "platform", "summary"],
+            template=(
+                "You are a content creator crafting {platform} posts for a brand.\n\n"
+                "Brand context:\n{context}\n\n"
+                "Post requirement:\n{summary}\n\n"
+                "Write one complete post suitable for {platform}. "
+                "Ensure it fits the platform’s tone and format, includes an engaging hook, "
+                "and ends with a relevant call to action."
+            ),
         )
+        chain = LLMChain(llm=self.llm, prompt=template)
 
-        inputs = self.tokenizer(
-            full_prompt, return_tensors="pt", padding=True, truncation=True, max_length=1024
-        )
-        if "attention_mask" not in inputs:
-            inputs["attention_mask"] = torch.ones_like(inputs["input_ids"])
-
-        inputs = {k: v.to(self.device) for k, v in inputs.items()}
-
-        with torch.no_grad():
-            try:
-                output = self.model.generate(
-                    **inputs,
-                    max_new_tokens=max_new_tokens,
-                    temperature=temperature,
-                    top_p=top_p,
-                    do_sample=do_sample,
-                )
-            except RuntimeError:
-                return "OOM: Lower MAX_NEW_TOKENS or enable quantization."
-
-        text = self.tokenizer.decode(output[0], skip_special_tokens=True)
-        return text[len(full_prompt):].strip() if text.startswith(full_prompt) else text.strip()
+        posts = []
+        for s in summaries:
+            result = chain.invoke({"context": context, "platform": platform, "summary": s})
+            posts.append({
+                "summary": s,
+                "platform": platform,
+                "content": result["text"].strip()
+            })
+        return posts

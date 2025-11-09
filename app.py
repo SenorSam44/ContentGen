@@ -1,20 +1,17 @@
 # app.py - Main Flask Application
 
 from flask import Flask, request, jsonify
-import sqlite3
-from contextlib import contextmanager
-import uuid
-from typing import List, Dict, Optional
 import logging
 import os
 from dotenv import load_dotenv
 
 import json
 import re
+from flask import Response, stream_with_context
 
 
 from src.contentgen.celery import make_celery
-from src.contentgen.database import init_database
+from src.contentgen.database import init_database, get_db_connection, DatabaseManager
 from src.contentgen.llm import LLMManager
 
 # Configure logging
@@ -42,334 +39,169 @@ def initialize_app():
     logger.info("Application initialized successfully")
 
 
-@contextmanager
-def get_db_connection():
-    """Context manager for database connections."""
-    conn = sqlite3.connect(os.getenv("DATABASE_PATH", "social_media.db"))
-    conn.row_factory = sqlite3.Row
-    try:
-        yield conn
-    finally:
-        conn.close()
-
-
 celery = make_celery(app)
 # Initialize LLM manager
 llm_manager = LLMManager()
 
-def generate_summary(business_type: str, platform: str) -> list[str]:
-    """Generate structured example summaries as a JSON list."""
-    prompt = f"""
-You are an expert social media marketer.
-
-Task:
-Generate 5 short example summaries (1–2 sentences) for {platform} posts about a {business_type}.
-Each example should:
-- Sound natural and professional
-- Avoid hashtags and emojis
-- Be self-contained (no numbering, no extra commentary)
-
-Return output **only** as a valid JSON list of strings.
-Example format:
-["Example 1", "Example 2", "Example 3"]
-"""
-
-    try:
-        raw_output = llm_manager.generate_text(prompt, max_new_tokens=200, temperature=0.7).strip()
-
-        # Try to parse as JSON directly
-        match = re.search(r"\[.*\]", raw_output, re.DOTALL)
-        if match:
-            cleaned = match.group(0)
-            examples = json.loads(cleaned)
-        else:
-            # fallback: split by newline if JSON not valid
-            examples = [line.strip(" -*>\n") for line in raw_output.split("\n") if line.strip()]
-
-        return [ex for ex in examples if ex]
-    except Exception as e:
-        logger.error(f"Error generating examples: {str(e)}")
-        return [f"Sample post idea for {business_type} on {platform}."]
-
-
-def expand_summary_to_post(summary: str, business_type: str, platform: str) -> str:
-    """Expand a short summary into a complete social media post."""
-    expand_prompt = f"""You are a professional social media content creator.
-Using the following summary, write a full post for {platform} that is engaging and clear.
-
-Summary: "{summary}"
-
-Guidelines:
-- Expand naturally into a full-length {platform} post
-- Add 2–3 relevant hashtags
-- Include a call-to-action
-- Maintain a tone appropriate for a {business_type}
-
-Post:"""
-
-    try:
-        full_post = llm_manager.generate_text(expand_prompt, max_new_tokens=800, temperature=0.9)
-        print(f"full_post: {full_post}")
-        return full_post.strip()
-    except Exception as e:
-        logger.error(f"Error expanding summary: {str(e)}")
-        return f"{summary}\n\nStay tuned for more from {business_type} on {platform}!"
-
-
-def generate_full_post(business_type: str, platform: str) -> str:
-    """Generate a full post in two stages: summary → full post."""
-    try:
-        summary = generate_summary(business_type, platform)
-        full_post = expand_summary_to_post(summary, business_type, platform)
-        return full_post
-    except Exception as e:
-        logger.error(f"Error generating full post: {str(e)}")
-        return f"🌟 {headline}\n\nExciting updates from {business_type}! Follow us for more."
-
-
-# ---------------------------
-# Database Operations
-# ---------------------------
-class DatabaseManager:
-    @staticmethod
-    def create_campaign(business_type: str, platform: str, total_posts: int) -> str:
-        """Create a new campaign and return its ID."""
-        campaign_id = str(uuid.uuid4())
-
-        with get_db_connection() as conn:
-            conn.execute('''
-                INSERT INTO campaigns (id, business_type, platform, total_posts, status)
-                VALUES (?, ?, ?, ?, 'headlines_generating')
-            ''', (campaign_id, business_type, platform, total_posts))
-            conn.commit()
-
-        return campaign_id
-
-    @staticmethod
-    def save_summaries(campaign_id: str, summaries: List[str]):
-        """Save generated summaries to database."""
-        with get_db_connection() as conn:
-            for i, summary in enumerate(summaries):
-                summary_id = str(uuid.uuid4())
-                conn.execute('''
-                    INSERT INTO post_headlines (id, campaign_id, headline, post_order, status)
-                    VALUES (?, ?, ?, ?, 'ready')
-                ''', (summary_id, campaign_id, summary, i + 1))
-
-                post_id = str(uuid.uuid4())
-                conn.execute('''
-                    INSERT INTO generated_posts (id, campaign_id, headline_id, status)
-                    VALUES (?, ?, ?, 'pending')
-                ''', (post_id, campaign_id, summary_id))
-
-            conn.execute('''
-                UPDATE campaigns SET status = 'posts_generating' WHERE id = ?
-            ''', (campaign_id,))
-            conn.commit()
-
-
-    @staticmethod
-    def update_campaign_status(campaign_id: str, status: str, error_message: str = None):
-        """Update campaign status."""
-        with get_db_connection() as conn:
-            if status == 'completed':
-                conn.execute('''
-                    UPDATE campaigns SET status = ?, completed_at = CURRENT_TIMESTAMP, error_message = ?
-                    WHERE id = ?
-                ''', (status, error_message, campaign_id))
-            else:
-                conn.execute('''
-                    UPDATE campaigns SET status = ?, error_message = ? WHERE id = ?
-                ''', (status, error_message, campaign_id))
-            conn.commit()
-
-    @staticmethod
-    def get_campaign_info(campaign_id: str) -> Optional[Dict]:
-        """Get campaign information with progress."""
-        with get_db_connection() as conn:
-            # Get campaign details
-            campaign = conn.execute('''
-                SELECT * FROM campaigns WHERE id = ?
-            ''', (campaign_id,)).fetchone()
-
-            if not campaign:
-                return None
-
-            # Get progress information
-            headlines_count = conn.execute('''
-                SELECT COUNT(*) as count FROM post_headlines WHERE campaign_id = ?
-            ''', (campaign_id,)).fetchone()['count']
-
-            completed_posts = conn.execute('''
-                SELECT COUNT(*) as count FROM generated_posts 
-                WHERE campaign_id = ? AND status = 'completed'
-            ''', (campaign_id,)).fetchone()['count']
-
-            failed_posts = conn.execute('''
-                SELECT COUNT(*) as count FROM generated_posts 
-                WHERE campaign_id = ? AND status = 'failed'
-            ''', (campaign_id,)).fetchone()['count']
-
-            return {
-                'id': campaign['id'],
-                'business_type': campaign['business_type'],
-                'platform': campaign['platform'],
-                'total_posts': campaign['total_posts'],
-                'status': campaign['status'],
-                'created_at': campaign['created_at'],
-                'completed_at': campaign['completed_at'],
-                'error_message': campaign['error_message'],
-                'progress': {
-                    'headlines_generated': headlines_count,
-                    'posts_completed': completed_posts,
-                    'posts_failed': failed_posts,
-                    'posts_pending': campaign['total_posts'] - completed_posts - failed_posts
-                }
-            }
-
-    @staticmethod
-    def get_campaign_posts(campaign_id: str) -> List[Dict]:
-        """Get all posts for a campaign."""
-        with get_db_connection() as conn:
-            posts = conn.execute('''
-                SELECT p.id, h.headline, h.post_order, p.content, p.status, 
-                       p.created_at, p.completed_at, p.error_message
-                FROM generated_posts p
-                JOIN post_headlines h ON p.headline_id = h.id
-                WHERE p.campaign_id = ?
-                ORDER BY h.post_order
-            ''', (campaign_id,)).fetchall()
-
-            return [dict(post) for post in posts]
-
-
-# ---------------------------
-# Celery Tasks
-# ---------------------------
-@celery.task(bind=True)
-def generate_posts_task(self, campaign_id: str):
-    """Background task to generate all posts for a campaign."""
-    try:
-        # Get campaign info
-        with get_db_connection() as conn:
-            campaign = conn.execute('''
-                SELECT business_type, platform FROM campaigns WHERE id = ?
-            ''', (campaign_id,)).fetchone()
-
-            if not campaign:
-                raise ValueError(f"Campaign {campaign_id} not found")
-
-            # Get pending posts
-            pending_posts = conn.execute('''
-                SELECT p.id, p.headline_id, h.headline
-                FROM generated_posts p
-                JOIN post_headlines h ON p.headline_id = h.id
-                WHERE p.campaign_id = ? AND p.status = 'pending'
-                ORDER BY h.post_order
-            ''', (campaign_id,)).fetchall()
-
-        total_posts = len(pending_posts)
-        business_type = campaign['business_type']
-        platform = campaign['platform']
-
-        # Generate posts one by one
-        for i, post_data in enumerate(pending_posts):
-            try:
-                # Update task progress
-                self.update_state(
-                    state='PROGRESS',
-                    meta={'current': i, 'total': total_posts, 'status': f'Generating post {i + 1}/{total_posts}'}
-                )
-
-                summary = post_data['headline']  # reuse the same column for now
-                full_content = expand_summary_to_post(summary, business_type, platform)
-
-
-                # Save to database
-                with get_db_connection() as conn:
-                    conn.execute('''
-                        UPDATE generated_posts 
-                        SET content = ?, status = 'completed', completed_at = CURRENT_TIMESTAMP
-                        WHERE id = ?
-                    ''', (full_content, post_data['id']))
-                    conn.commit()
-
-                logger.info(f"Generated post {i + 1}/{total_posts} for campaign {campaign_id}")
-
-            except Exception as e:
-                logger.error(f"Error generating post {post_data['id']}: {str(e)}")
-                # Mark post as failed
-                with get_db_connection() as conn:
-                    conn.execute('''
-                        UPDATE generated_posts 
-                        SET status = 'failed', error_message = ?
-                        WHERE id = ?
-                    ''', (str(e), post_data['id']))
-                    conn.commit()
-
-        # Update campaign status to completed
-        DatabaseManager.update_campaign_status(campaign_id, 'completed')
-
-        return jsonify({
-            'success': True,
-            'campaign_id': campaign_id,
-            'message': 'Summaries generated successfully. Posts are being developed in background.'
-        })
-
-    except Exception as e:
-        logger.error(f"Task failed for campaign {campaign_id}: {str(e)}")
-        DatabaseManager.update_campaign_status(campaign_id, 'failed', str(e))
-        raise
-
-
+@celery.task
+def generate_summaries_task(campaign_id, business_type, platform, total_posts):
+    summaries = llm_manager.generate_summaries(
+        topics=[business_type],
+        business_profile={"business_type": business_type, "platform": platform},
+        n=total_posts
+    )
+    DatabaseManager.save_summaries(campaign_id, summaries)
+    return {"summaries": summaries}
 # ---------------------------
 # Flask API Routes
 # ---------------------------
 @app.route('/api/campaigns/create', methods=['POST'])
 def create_campaign():
-    """Stage 1: Create campaign and generate headlines."""
+    data = request.json
+    business_type = data.get('business_type', '').strip()
+    platform = data.get('platform', '').strip()
+    total_posts = int(data.get('total_posts', 10))
+
+    max_posts = int(os.getenv("MAX_POSTS_PER_CAMPAIGN", 20))
+    if not business_type or not platform:
+        return jsonify({'error': 'business_type and platform are required'}), 400
+    if not (1 <= total_posts <= max_posts):
+        return jsonify({'error': f'total_posts must be between 1 and {max_posts}'}), 400
+
+    # Step 1: Create campaign entry
+    campaign_id = DatabaseManager.create_campaign(business_type, platform, total_posts)
+
+    # Step 2: Generate summaries immediately (synchronous, for debugging)
+    # try:
+    summaries = llm_manager.generate_summaries(
+        topics=[business_type],
+        business_profile={"business_type": business_type, "platform": platform},
+        n=total_posts
+    )
+
+    # Step 3: Save summaries to database
+    # DatabaseManager.save_summaries(campaign_id, summaries)
+
+    return jsonify({
+        "success": True,
+        "campaign_id": campaign_id,
+        "summaries": summaries,
+        "message": "Campaign created and summaries generated successfully."
+    })
+
+    # except Exception as e:
+        # If something fails, update campaign status and return error
+    DatabaseManager.update_campaign_status(campaign_id, 'failed', str(e))
+    return jsonify({
+        "success": False,
+        "campaign_id": campaign_id,
+        "error": str(e),
+        "message": "Failed to generate summaries."
+    }), 500
+
+@app.route('/api/campaigns/<campaign_id>/summaries', methods=['GET'])
+def get_campaign_summaries(campaign_id):
+    """Get all summaries for a specific campaign after checking status."""
     try:
-        data = request.json
-        business_type = data.get('business_type', '').strip()
-        platform = data.get('platform', '').strip()
-        total_posts = data.get('total_posts', 10)
+        # Step 1: Get campaign info
+        campaign_info = DatabaseManager.get_campaign_info(campaign_id)
+        if not campaign_info:
+            return jsonify({'error': 'Campaign not found'}), 404
 
-        # Validation
-        if not business_type or not platform:
-            return jsonify({'error': 'business_type and platform are required'}), 400
+        # Step 2: Check status
+        status = campaign_info['status']
+        if status in ['headlines_generating', 'posts_generating']:
+            return jsonify({
+                'success': False,
+                'campaign_id': campaign_id,
+                'status': status,
+                'message': 'Summaries are still being generated. Please try again later.'
+            }), 202  # 202 Accepted, still processing
+        elif status == 'failed':
+            return jsonify({
+                'success': False,
+                'campaign_id': campaign_id,
+                'status': status,
+                'message': campaign_info.get('error_message', 'Task failed')
+            }), 500
 
-        if not isinstance(total_posts, int) or total_posts < 1 or total_posts > os.getenv("MAX_POSTS_PER_CAMPAIGN", 20):
-            return jsonify({'error': f'total_posts must be between 1 and {os.getenv("MAX_POSTS_PER_CAMPAIGN", 20)}'}), 400
-
-        # Create campaign
-        campaign_id = DatabaseManager.create_campaign(business_type, platform, total_posts)
-
-        # Generate headlines (Stage 1)
-        logger.info(f"Generating {total_posts} summaries for campaign {campaign_id}")
-
-        summaries = []
-        for i in range(total_posts):
-            summary = generate_summary(business_type, platform)
-            summaries.append(summary)
-
-        DatabaseManager.save_summaries(campaign_id, summaries)
-
-        # Start background task for post generation (Stage 2)
-        task = generate_posts_task.delay(campaign_id)
+        # Step 3: Fetch summaries
+        summaries = DatabaseManager.get_campaign_summaries(campaign_id)
+        if not summaries:
+            return jsonify({
+                'success': True,
+                'campaign_id': campaign_id,
+                'status': status,
+                'summaries': [],
+                'message': 'No summaries generated yet.'
+            })
 
         return jsonify({
             'success': True,
             'campaign_id': campaign_id,
-            'task_id': task.id,
-            'summaries': summaries,
-            'message': 'Headlines generated successfully. Posts are being generated in background.'
+            'status': status,
+            'summaries': summaries
         })
 
     except Exception as e:
-        logger.error(f"Error creating campaign: {str(e)}")
+        logger.error(f"Error fetching summaries: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
-from flask import Response, stream_with_context
+
+@app.route('/api/campaigns/<campaign_id>/develop_posts', methods=['POST'])
+def develop_posts_for_campaign(campaign_id):
+    """
+    Generate detailed posts for all summaries of a given campaign.
+    """
+    try:
+        data = request.get_json() or {}
+        platform = data.get("platform", "").strip()
+        business_type = data.get("business_type", "").strip()
+
+        if not platform or not business_type:
+            return jsonify({"error": "platform and business_type are required"}), 400
+
+        # 1. Fetch summaries from database (if already saved)
+        summaries = DatabaseManager.get_campaign_summaries(campaign_id)
+        if not summaries:
+            return jsonify({
+                "error": "No summaries found for this campaign. Create one first."
+            }), 404
+
+        # 2. Extract summary texts
+        summary_texts = [
+            s["summary"] if isinstance(s, dict) and "summary" in s else s
+            for s in summaries
+        ]
+
+        # 3. Generate posts for each summary
+        posts = llm_manager.generate_posts(
+            summaries=summary_texts,
+            platform=platform,
+            business_profile={"business_type": business_type, "platform": platform},
+        )
+
+        # 4. Save posts in database
+        DatabaseManager.save_posts(campaign_id, posts)
+
+        # 5. Return structured output
+        return jsonify({
+            "success": True,
+            "campaign_id": campaign_id,
+            "platform": platform,
+            "posts": posts,
+            "message": f"Generated {len(posts)} posts successfully."
+        })
+
+    except Exception as e:
+        logger.error(f"Error generating posts: {e}")
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "message": "Failed to generate posts."
+        }), 500
+
+
 
 @app.route('/api/develop_post', methods=["POST"])
 def develop_post():
